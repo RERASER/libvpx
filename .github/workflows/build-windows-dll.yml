@@ -76,13 +76,7 @@ jobs:
             '<TargetName>vpx</TargetName>'
           )
 
-          $linkBlock = @'
-          </ClCompile>
-          <Link>
-            <GenerateDebugInformation>true</GenerateDebugInformation>
-            <ModuleDefinitionFile>vpx.def</ModuleDefinitionFile>
-          </Link>
-'@
+          $linkBlock = '</ClCompile>' + "`n" + '<Link>' + "`n" + '<GenerateDebugInformation>true</GenerateDebugInformation>' + "`n" + '<ModuleDefinitionFile>vpx.def</ModuleDefinitionFile>' + "`n" + '</Link>'
           $text = $text.Replace('</ClCompile>', $linkBlock)
 
           if ("${{ matrix.compiler }}" -eq "clang-cl") {
