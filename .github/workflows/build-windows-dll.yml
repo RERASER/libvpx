@@ -169,7 +169,8 @@ jobs:
       - name: Verify exports and dependencies
         shell: pwsh
         run: |
-          $dll = "artifact-${{ matrix.compiler }}/bin/vpx.dll"
+          $out = "artifact-${{ matrix.compiler }}"
+          $dll = "$out/bin/vpx.dll"
           $exports = (& dumpbin /nologo /exports $dll | Out-String)
           $deps = (& dumpbin /nologo /dependents $dll | Out-String)
 
