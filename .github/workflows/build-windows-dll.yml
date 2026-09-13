@@ -98,22 +98,24 @@ jobs:
             # libvpx's VS generator only emits /arch:AVX for avx*.c files.
             # MSVC accepts SSSE3/SSE4 intrinsics without per-file switches,
             # while clang-cl requires the corresponding target features.
+            # Preserve %(AdditionalOptions) so the ClangCL x64 target flags
+            # inherited from the ItemDefinitionGroup are not lost.
             foreach ($compile in $xml.SelectNodes('//m:ClCompile[@Include]', $ns)) {
               $include = $compile.GetAttribute('Include').ToLowerInvariant()
               $extra = $null
 
               if ($include -match 'avx512.*\.c$') {
-                $extra = '/clang:-mavx512f /clang:-mavx512bw /clang:-mavx512dq /clang:-mavx512vl /clang:-mavx512cd'
+                $extra = '/clang:-m64 /clang:-mavx512f /clang:-mavx512bw /clang:-mavx512dq /clang:-mavx512vl /clang:-mavx512cd'
               } elseif ($include -match 'avx2.*\.c$') {
-                $extra = '/clang:-mavx2'
+                $extra = '/clang:-m64 /clang:-mavx2'
               } elseif ($include -match 'avx.*\.c$') {
-                $extra = '/clang:-mavx'
+                $extra = '/clang:-m64 /clang:-mavx'
               } elseif ($include -match 'sse4.*\.c$') {
-                $extra = '/clang:-msse4.1'
+                $extra = '/clang:-m64 /clang:-msse4.1'
               } elseif ($include -match 'ssse3.*\.c$') {
-                $extra = '/clang:-mssse3'
+                $extra = '/clang:-m64 /clang:-mssse3'
               } elseif ($include -match 'sse3.*\.c$') {
-                $extra = '/clang:-msse3'
+                $extra = '/clang:-m64 /clang:-msse3'
               }
 
               if ($null -ne $extra) {
@@ -123,7 +125,19 @@ jobs:
                   [void]$compile.AppendChild($options)
                 }
                 $existing = $options.InnerText.Trim()
-                $options.InnerText = if ($existing) { "$existing $extra" } else { $extra }
+                if ($existing -and $existing -notmatch '%\(AdditionalOptions\)') {
+                  $existing = "%(... )"
+                }
+                if ($options.InnerText.Trim()) {
+                  $existingRaw = $options.InnerText.Trim()
+                  if ($existingRaw -match '%\(AdditionalOptions\)') {
+                    $options.InnerText = "$existingRaw $extra"
+                  } else {
+                    $options.InnerText = "%(AdditionalOptions) $existingRaw $extra"
+                  }
+                } else {
+                  $options.InnerText = "%(AdditionalOptions) $extra"
+                }
               }
             }
           }
@@ -168,7 +182,7 @@ jobs:
           Select-String -Path $project -Pattern '<ConfigurationType>|<PlatformToolset>|<TargetName>|<ModuleDefinitionFile>'
           if ("${{ matrix.compiler }}" -eq 'clang-cl') {
             Write-Host '--- clang-cl SIMD per-file options ---'
-            Select-String -Path $project -Pattern 'mavx|msse|mssse'
+            Select-String -Path $project -Pattern 'm64|mavx|msse|mssse'
           }
 
       - name: Set up MSBuild
