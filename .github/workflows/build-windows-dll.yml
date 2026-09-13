@@ -37,6 +37,15 @@ jobs:
             diffutils
             nasm
 
+      - name: Expose NASM to Windows tools
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          nasm_dir="$(cygpath -w "$(dirname "$(command -v nasm)")")"
+          printf '%s\n' "$nasm_dir" >> "$GITHUB_PATH"
+          nasm -v
+          printf 'NASM directory: %s\n' "$nasm_dir"
+
       - name: Configure and generate Visual Studio project
         shell: msys2 {0}
         run: |
@@ -132,6 +141,7 @@ jobs:
       - name: Build Release DLL
         shell: pwsh
         run: |
+          nasm -v
           msbuild "build-gha-${{ matrix.compiler }}/vpx.vcxproj" `
             /m `
             /p:Configuration=Release `
