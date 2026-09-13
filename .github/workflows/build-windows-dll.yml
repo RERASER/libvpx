@@ -94,6 +94,38 @@ jobs:
             foreach ($node in $toolsets) {
               $node.InnerText = 'ClangCl'
             }
+
+            # libvpx's VS generator only emits /arch:AVX for avx*.c files.
+            # MSVC accepts SSSE3/SSE4 intrinsics without per-file switches,
+            # while clang-cl requires the corresponding target features.
+            foreach ($compile in $xml.SelectNodes('//m:ClCompile[@Include]', $ns)) {
+              $include = $compile.GetAttribute('Include').ToLowerInvariant()
+              $extra = $null
+
+              if ($include -match 'avx512.*\.c$') {
+                $extra = '/clang:-mavx512f /clang:-mavx512bw /clang:-mavx512dq /clang:-mavx512vl /clang:-mavx512cd'
+              } elseif ($include -match 'avx2.*\.c$') {
+                $extra = '/clang:-mavx2'
+              } elseif ($include -match 'avx.*\.c$') {
+                $extra = '/clang:-mavx'
+              } elseif ($include -match 'sse4.*\.c$') {
+                $extra = '/clang:-msse4.1'
+              } elseif ($include -match 'ssse3.*\.c$') {
+                $extra = '/clang:-mssse3'
+              } elseif ($include -match 'sse3.*\.c$') {
+                $extra = '/clang:-msse3'
+              }
+
+              if ($null -ne $extra) {
+                $options = $compile.SelectSingleNode('m:AdditionalOptions', $ns)
+                if ($null -eq $options) {
+                  $options = $xml.CreateElement('AdditionalOptions', $nsUri)
+                  [void]$compile.AppendChild($options)
+                }
+                $existing = $options.InnerText.Trim()
+                $options.InnerText = if ($existing) { "$existing $extra" } else { $extra }
+              }
+            }
           }
 
           $itemDefinitionGroups = $xml.SelectNodes('//m:ItemDefinitionGroup', $ns)
@@ -134,14 +166,54 @@ jobs:
 
           Write-Host '--- Project type/toolset ---'
           Select-String -Path $project -Pattern '<ConfigurationType>|<PlatformToolset>|<TargetName>|<ModuleDefinitionFile>'
+          if ("${{ matrix.compiler }}" -eq 'clang-cl') {
+            Write-Host '--- clang-cl SIMD per-file options ---'
+            Select-String -Path $project -Pattern 'mavx|msse|mssse'
+          }
 
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
+
+      - name: Expose Visual C++ tools
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) {
+            $vswhere = 'C:\ProgramData\Chocolatey\bin\vswhere.exe'
+          }
+          $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $install) {
+            throw 'Visual Studio C++ toolchain was not found.'
+          }
+
+          $msvcRoot = Join-Path $install 'VC\Tools\MSVC'
+          $msvcVersion = Get-ChildItem $msvcRoot -Directory | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          if ($null -eq $msvcVersion) {
+            throw 'MSVC tools directory was not found.'
+          }
+          $msvcBin = Join-Path $msvcVersion.FullName 'bin\Hostx64\x64'
+          if (-not (Test-Path (Join-Path $msvcBin 'dumpbin.exe'))) {
+            throw "dumpbin.exe was not found in $msvcBin"
+          }
+          $msvcBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+          $llvmBin = Join-Path $install 'VC\Tools\Llvm\x64\bin'
+          if (Test-Path (Join-Path $llvmBin 'clang-cl.exe')) {
+            $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+          Write-Host "MSVC tools: $msvcBin"
+          Write-Host "LLVM tools: $llvmBin"
 
       - name: Build Release DLL
         shell: pwsh
         run: |
           nasm -v
+          if ("${{ matrix.compiler }}" -eq 'clang-cl') {
+            clang-cl --version
+          } else {
+            cl 2>&1 | Select-Object -First 3
+          }
           msbuild "build-gha-${{ matrix.compiler }}/vpx.vcxproj" `
             /m `
             /p:Configuration=Release `
@@ -212,10 +284,7 @@ jobs:
           if ("${{ matrix.compiler }}" -eq 'clang-cl') {
             (& clang-cl --version | Out-String) | Set-Content $out
           } else {
-            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-            $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-            $vcvars = Join-Path $install 'VC\Auxiliary\Build\vcvars64.bat'
-            cmd /c "`"$vcvars`" >nul && cl 2>&1" | Out-String | Set-Content $out
+            (cl 2>&1 | Out-String) | Set-Content $out
           }
           Get-Content $out
 
