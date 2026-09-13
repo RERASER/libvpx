@@ -1,0 +1,158 @@
+name: Build Windows DLL
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-windows-dll.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows x64 (${{ matrix.compiler }})
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler:
+          - msvc
+          - clang-cl
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2 build tools
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: true
+          install: >-
+            make
+            perl
+            diffutils
+            nasm
+
+      - name: Configure and generate Visual Studio project
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          mkdir -p build-gha-${{ matrix.compiler }}
+          cd build-gha-${{ matrix.compiler }}
+          ../configure \
+            --target=x86_64-win64-vs17 \
+            --enable-shared \
+            --disable-static \
+            --disable-examples \
+            --disable-tools \
+            --disable-docs \
+            --disable-unit-tests \
+            --disable-install-docs \
+            --as=nasm
+          make vpx.vcxproj
+
+      - name: Select clang-cl toolset
+        if: matrix.compiler == 'clang-cl'
+        shell: pwsh
+        run: |
+          $project = "build-gha-${{ matrix.compiler }}/vpx.vcxproj"
+          $text = Get-Content $project -Raw
+          if ($text -notmatch '<PlatformToolset>v143</PlatformToolset>') {
+            throw "Expected the generated VS2022 v143 PlatformToolset entry."
+          }
+          $text = $text.Replace('<PlatformToolset>v143</PlatformToolset>', '<PlatformToolset>ClangCl</PlatformToolset>')
+          Set-Content -Path $project -Value $text -Encoding utf8
+          Select-String -Path $project -Pattern '<PlatformToolset>'
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release DLL
+        shell: pwsh
+        run: |
+          msbuild "build-gha-${{ matrix.compiler }}/vpx.vcxproj" `
+            /m `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:UseMultiToolTask=true `
+            /verbosity:minimal
+
+      - name: Collect package
+        shell: pwsh
+        run: |
+          $build = "build-gha-${{ matrix.compiler }}"
+          $release = Join-Path $build "x64/Release"
+          $out = "artifact-${{ matrix.compiler }}"
+          New-Item -ItemType Directory -Force -Path "$out/bin", "$out/lib", "$out/include/vpx" | Out-Null
+
+          $dll = Join-Path $release "vpx.dll"
+          if (-not (Test-Path $dll)) {
+            Write-Host "Files produced under the build directory:"
+            Get-ChildItem $build -Recurse -File | Select-Object FullName
+            throw "vpx.dll was not produced at $dll"
+          }
+
+          Copy-Item $dll "$out/bin/vpx.dll"
+          if (Test-Path (Join-Path $release "vpx.lib")) {
+            Copy-Item (Join-Path $release "vpx.lib") "$out/lib/vpx.lib"
+          }
+          if (Test-Path (Join-Path $release "vpx.exp")) {
+            Copy-Item (Join-Path $release "vpx.exp") "$out/lib/vpx.exp"
+          }
+
+          Copy-Item vpx/*.h "$out/include/vpx/"
+          Copy-Item LICENSE "$out/LICENSE"
+          Copy-Item PATENTS "$out/PATENTS"
+
+      - name: Verify exports and dependencies
+        shell: pwsh
+        run: |
+          $dll = "artifact-${{ matrix.compiler }}/bin/vpx.dll"
+          $exports = (& dumpbin /nologo /exports $dll | Out-String)
+          $deps = (& dumpbin /nologo /dependents $dll | Out-String)
+
+          Write-Host "--- Required exports ---"
+          foreach ($symbol in @(
+            'vpx_codec_vp9_cx',
+            'vpx_codec_enc_config_default',
+            'vpx_codec_enc_init_ver',
+            'vpx_codec_encode',
+            'vpx_codec_get_cx_data',
+            'vpx_codec_destroy'
+          )) {
+            if ($exports -notmatch "(?m)\b$([regex]::Escape($symbol))\b") {
+              throw "Missing required export: $symbol"
+            }
+            Write-Host "OK: $symbol"
+          }
+
+          Write-Host "--- DLL dependencies ---"
+          Write-Host $deps
+
+          $exports | Set-Content "artifact-${{ matrix.compiler }}/exports.txt"
+          $deps | Set-Content "artifact-${{ matrix.compiler }}/dependencies.txt"
+
+      - name: Record compiler identity
+        shell: pwsh
+        run: |
+          $out = "artifact-${{ matrix.compiler }}/compiler.txt"
+          if ("${{ matrix.compiler }}" -eq "clang-cl") {
+            (& clang-cl --version | Out-String) | Set-Content $out
+          } else {
+            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            $vcvars = Join-Path $install "VC\Auxiliary\Build\vcvars64.bat"
+            cmd /c "`"$vcvars`" >nul && cl 2>&1" | Out-String | Set-Content $out
+          }
+          Get-Content $out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libvpx-win-x64-${{ matrix.compiler }}
+          path: artifact-${{ matrix.compiler }}/
+          if-no-files-found: error
