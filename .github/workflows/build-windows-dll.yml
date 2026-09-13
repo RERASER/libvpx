@@ -14,7 +14,7 @@ permissions:
 jobs:
   build:
     name: Windows x64 (${{ matrix.compiler }})
-    runs-on: windows-2025
+    runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
@@ -45,8 +45,6 @@ jobs:
           cd build-gha-${{ matrix.compiler }}
           ../configure \
             --target=x86_64-win64-vs17 \
-            --enable-shared \
-            --disable-static \
             --disable-examples \
             --disable-tools \
             --disable-docs \
@@ -54,19 +52,53 @@ jobs:
             --disable-install-docs \
             --as=nasm
           make vpx.vcxproj
+          test -f vpx.def
+          test -f vpx.vcxproj
 
-      - name: Select clang-cl toolset
-        if: matrix.compiler == 'clang-cl'
+      - name: Convert generated project to DLL
         shell: pwsh
         run: |
           $project = "build-gha-${{ matrix.compiler }}/vpx.vcxproj"
           $text = Get-Content $project -Raw
-          if ($text -notmatch '<PlatformToolset>v143</PlatformToolset>') {
-            throw "Expected the generated VS2022 v143 PlatformToolset entry."
+
+          if ($text -notmatch '<ConfigurationType>StaticLibrary</ConfigurationType>') {
+            throw "Expected a generated static-library Visual Studio project."
           }
-          $text = $text.Replace('<PlatformToolset>v143</PlatformToolset>', '<PlatformToolset>ClangCl</PlatformToolset>')
+
+          $text = $text.Replace(
+            '<ConfigurationType>StaticLibrary</ConfigurationType>',
+            '<ConfigurationType>DynamicLibrary</ConfigurationType>'
+          )
+
+          $text = [regex]::Replace(
+            $text,
+            '<TargetName>vpxmd[d]?</TargetName>',
+            '<TargetName>vpx</TargetName>'
+          )
+
+          $linkBlock = @'
+          </ClCompile>
+          <Link>
+            <GenerateDebugInformation>true</GenerateDebugInformation>
+            <ModuleDefinitionFile>vpx.def</ModuleDefinitionFile>
+          </Link>
+'@
+          $text = $text.Replace('</ClCompile>', $linkBlock)
+
+          if ("${{ matrix.compiler }}" -eq "clang-cl") {
+            if ($text -notmatch '<PlatformToolset>v143</PlatformToolset>') {
+              throw "Expected the generated VS2022 v143 PlatformToolset entry."
+            }
+            $text = $text.Replace(
+              '<PlatformToolset>v143</PlatformToolset>',
+              '<PlatformToolset>ClangCl</PlatformToolset>'
+            )
+          }
+
           Set-Content -Path $project -Value $text -Encoding utf8
-          Select-String -Path $project -Pattern '<PlatformToolset>'
+
+          Write-Host "--- Project type/toolset ---"
+          Select-String -Path $project -Pattern '<ConfigurationType>|<PlatformToolset>|<TargetName>|<ModuleDefinitionFile>'
 
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
