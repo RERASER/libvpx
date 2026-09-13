@@ -59,39 +59,71 @@ jobs:
         shell: pwsh
         run: |
           $project = "build-gha-${{ matrix.compiler }}/vpx.vcxproj"
-          $text = Get-Content $project -Raw
+          [xml]$xml = Get-Content $project -Raw
+          $nsUri = $xml.Project.NamespaceURI
+          $ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
+          $ns.AddNamespace('m', $nsUri)
 
-          if ($text -notmatch '<ConfigurationType>StaticLibrary</ConfigurationType>') {
-            throw "Expected a generated static-library Visual Studio project."
+          $configurationTypes = $xml.SelectNodes("//m:PropertyGroup[@Label='Configuration']/m:ConfigurationType", $ns)
+          if ($configurationTypes.Count -eq 0) {
+            throw 'No ConfigurationType nodes found in generated project.'
+          }
+          foreach ($node in $configurationTypes) {
+            $node.InnerText = 'DynamicLibrary'
           }
 
-          $text = $text.Replace(
-            '<ConfigurationType>StaticLibrary</ConfigurationType>',
-            '<ConfigurationType>DynamicLibrary</ConfigurationType>'
-          )
+          $targetNames = $xml.SelectNodes('//m:PropertyGroup/m:TargetName', $ns)
+          foreach ($node in $targetNames) {
+            $node.InnerText = 'vpx'
+          }
 
-          $text = [regex]::Replace(
-            $text,
-            '<TargetName>vpxmd[d]?</TargetName>',
-            '<TargetName>vpx</TargetName>'
-          )
-
-          $linkBlock = '</ClCompile>' + "`n" + '<Link>' + "`n" + '<GenerateDebugInformation>true</GenerateDebugInformation>' + "`n" + '<ModuleDefinitionFile>vpx.def</ModuleDefinitionFile>' + "`n" + '</Link>'
-          $text = $text.Replace('</ClCompile>', $linkBlock)
-
-          if ("${{ matrix.compiler }}" -eq "clang-cl") {
-            if ($text -notmatch '<PlatformToolset>v143</PlatformToolset>') {
-              throw "Expected the generated VS2022 v143 PlatformToolset entry."
+          if ("${{ matrix.compiler }}" -eq 'clang-cl') {
+            $toolsets = $xml.SelectNodes("//m:PropertyGroup[@Label='Configuration']/m:PlatformToolset", $ns)
+            if ($toolsets.Count -eq 0) {
+              throw 'No PlatformToolset nodes found in generated project.'
             }
-            $text = $text.Replace(
-              '<PlatformToolset>v143</PlatformToolset>',
-              '<PlatformToolset>ClangCl</PlatformToolset>'
-            )
+            foreach ($node in $toolsets) {
+              $node.InnerText = 'ClangCl'
+            }
           }
 
-          Set-Content -Path $project -Value $text -Encoding utf8
+          $itemDefinitionGroups = $xml.SelectNodes('//m:ItemDefinitionGroup', $ns)
+          if ($itemDefinitionGroups.Count -eq 0) {
+            throw 'No ItemDefinitionGroup nodes found in generated project.'
+          }
+          foreach ($group in $itemDefinitionGroups) {
+            $link = $group.SelectSingleNode('m:Link', $ns)
+            if ($null -eq $link) {
+              $link = $xml.CreateElement('Link', $nsUri)
+              [void]$group.AppendChild($link)
+            }
 
-          Write-Host "--- Project type/toolset ---"
+            $debugInfo = $link.SelectSingleNode('m:GenerateDebugInformation', $ns)
+            if ($null -eq $debugInfo) {
+              $debugInfo = $xml.CreateElement('GenerateDebugInformation', $nsUri)
+              [void]$link.AppendChild($debugInfo)
+            }
+            $debugInfo.InnerText = 'true'
+
+            $defFile = $link.SelectSingleNode('m:ModuleDefinitionFile', $ns)
+            if ($null -eq $defFile) {
+              $defFile = $xml.CreateElement('ModuleDefinitionFile', $nsUri)
+              [void]$link.AppendChild($defFile)
+            }
+            $defFile.InnerText = 'vpx.def'
+          }
+
+          $settings = New-Object System.Xml.XmlWriterSettings
+          $settings.Indent = $true
+          $settings.Encoding = New-Object System.Text.UTF8Encoding($false)
+          $writer = [System.Xml.XmlWriter]::Create((Resolve-Path $project), $settings)
+          try {
+            $xml.Save($writer)
+          } finally {
+            $writer.Dispose()
+          }
+
+          Write-Host '--- Project type/toolset ---'
           Select-String -Path $project -Pattern '<ConfigurationType>|<PlatformToolset>|<TargetName>|<ModuleDefinitionFile>'
 
       - name: Set up MSBuild
@@ -111,23 +143,23 @@ jobs:
         shell: pwsh
         run: |
           $build = "build-gha-${{ matrix.compiler }}"
-          $release = Join-Path $build "x64/Release"
+          $release = Join-Path $build 'x64/Release'
           $out = "artifact-${{ matrix.compiler }}"
           New-Item -ItemType Directory -Force -Path "$out/bin", "$out/lib", "$out/include/vpx" | Out-Null
 
-          $dll = Join-Path $release "vpx.dll"
+          $dll = Join-Path $release 'vpx.dll'
           if (-not (Test-Path $dll)) {
-            Write-Host "Files produced under the build directory:"
+            Write-Host 'Files produced under the build directory:'
             Get-ChildItem $build -Recurse -File | Select-Object FullName
             throw "vpx.dll was not produced at $dll"
           }
 
           Copy-Item $dll "$out/bin/vpx.dll"
-          if (Test-Path (Join-Path $release "vpx.lib")) {
-            Copy-Item (Join-Path $release "vpx.lib") "$out/lib/vpx.lib"
+          if (Test-Path (Join-Path $release 'vpx.lib')) {
+            Copy-Item (Join-Path $release 'vpx.lib') "$out/lib/vpx.lib"
           }
-          if (Test-Path (Join-Path $release "vpx.exp")) {
-            Copy-Item (Join-Path $release "vpx.exp") "$out/lib/vpx.exp"
+          if (Test-Path (Join-Path $release 'vpx.exp')) {
+            Copy-Item (Join-Path $release 'vpx.exp') "$out/lib/vpx.exp"
           }
 
           Copy-Item vpx/*.h "$out/include/vpx/"
@@ -141,7 +173,7 @@ jobs:
           $exports = (& dumpbin /nologo /exports $dll | Out-String)
           $deps = (& dumpbin /nologo /dependents $dll | Out-String)
 
-          Write-Host "--- Required exports ---"
+          Write-Host '--- Required exports ---'
           foreach ($symbol in @(
             'vpx_codec_vp9_cx',
             'vpx_codec_enc_config_default',
@@ -156,22 +188,22 @@ jobs:
             Write-Host "OK: $symbol"
           }
 
-          Write-Host "--- DLL dependencies ---"
+          Write-Host '--- DLL dependencies ---'
           Write-Host $deps
 
-          $exports | Set-Content "artifact-${{ matrix.compiler }}/exports.txt"
-          $deps | Set-Content "artifact-${{ matrix.compiler }}/dependencies.txt"
+          $exports | Set-Content "$out/exports.txt"
+          $deps | Set-Content "$out/dependencies.txt"
 
       - name: Record compiler identity
         shell: pwsh
         run: |
           $out = "artifact-${{ matrix.compiler }}/compiler.txt"
-          if ("${{ matrix.compiler }}" -eq "clang-cl") {
+          if ("${{ matrix.compiler }}" -eq 'clang-cl') {
             (& clang-cl --version | Out-String) | Set-Content $out
           } else {
             $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
             $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-            $vcvars = Join-Path $install "VC\Auxiliary\Build\vcvars64.bat"
+            $vcvars = Join-Path $install 'VC\Auxiliary\Build\vcvars64.bat'
             cmd /c "`"$vcvars`" >nul && cl 2>&1" | Out-String | Set-Content $out
           }
           Get-Content $out
